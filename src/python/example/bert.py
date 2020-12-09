@@ -7,10 +7,13 @@ sys.path.insert(1, os.path.abspath("./src/python"))
 os.environ["PATH"] = os.path.abspath(
     "./build/src/tools/nnfusion") + ":" + os.environ["PATH"]
 
+from pathlib import Path
+from sklearn.model_selection import train_test_split
 import numpy as np
 import torch
 torch.manual_seed(0)
 from torch import nn
+from torch.utils.data import DataLoader
 from transformers import BertForSequenceClassification
 from transformers import BertTokenizer
 from nnf.runner import Runner
@@ -55,38 +58,161 @@ def test_runner():
             loss, nnf_loss)
 
 
-def train_bert():
+def for_test():
     device = "cuda:0"
     model = BertForSequenceClassification.from_pretrained(
         'bert-base-uncased', return_dict=True).to(device)
+    model.load_state_dict(torch.load("/data/zimiao/models/bert_after_iter0.pt"))
+    model.eval()
     # model.train()
     wrapper = WrapperModel(model)
 
-    tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
-    text_batch = ["I love Pixar.", "I don't care for Pixar."]
-    encoding = tokenizer(text_batch,
-                         return_tensors='pt',
-                         padding=True,
-                         truncation=True)
-    input_ids = encoding['input_ids'].to(device)
-    attention_mask = encoding['attention_mask'].to(device)
-    labels = torch.tensor([1, 0]).unsqueeze(0).to(device)
+    # tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+    # text_batch = ["I love Pixar.", "I don't care for Pixar."]
+    # encoding = tokenizer(text_batch,
+    #                      return_tensors='pt',
+    #                      padding=True,
+    #                      truncation=True)
+    # input_ids = encoding['input_ids'].to(device)
+    # attention_mask = encoding['attention_mask'].to(device)
+    # labels = torch.tensor([1, 0]).unsqueeze(0).to(device)
     # loss = wrapper(input_ids, attention_mask, labels)
     # print(loss)
 
-    trainer = Trainer(wrapper, device=device)
+    input_ids = torch.ones([1, 512], dtype=torch.int64).to(device)	
+    attention_mask = torch.ones([1, 512], dtype=torch.int64).to(device)	
+    labels = torch.ones([1, 1], dtype=torch.int64).to(device)
+
+    trainer = Trainer(wrapper, device=device, workdir="./tmp")
     print("feeding")
-    for i in range(10):
+    for i in range(10000):
         pytorch_loss = trainer.run_by_pytorch(input_ids, attention_mask,
                                               labels)
         nnf_loss = trainer(input_ids, attention_mask, labels)
         print("iter ", i)
         print('pytorch_loss: ', pytorch_loss)
         print('nnf_loss: ', nnf_loss)
+        # if i == 0:
+        #     torch.save(model.state_dict(), "/data/zimiao/models/bert_after_iter0.pt")
 
-    torch.save(model.state_dict(), "/tmp/bert.pt")
+def export_onnx():
+    device = "cuda:0"
+    model = BertForSequenceClassification.from_pretrained(
+        'bert-base-uncased', return_dict=True).to(device)
+    model.load_state_dict(torch.load("/data/zimiao/models/bert_after_iter0.pt"))
+    model.eval()
+    wrapper = WrapperModel(model)
 
+    input_ids = torch.ones([1, 512], dtype=torch.int64).to(device)	
+    attention_mask = torch.ones([1, 512], dtype=torch.int64).to(device)	
+    labels = torch.ones([1, 1], dtype=torch.int64).to(device)
+
+    print(wrapper(input_ids, attention_mask, labels))
+    torch.onnx.export(wrapper.to(device),
+                      (input_ids, attention_mask, labels),
+                      "/data/zimiao/models/bert_after_iter0.onnx",
+                      opset_version=12,
+                      input_names=["input0", "input1", "input2"], 
+                      output_names=["output_0"],
+                      _retain_param_name=True,
+                      do_constant_folding=False)
+
+def get_grad():
+    device = "cuda:0"
+    model = BertForSequenceClassification.from_pretrained(
+        'bert-base-uncased', return_dict=True).to(device)
+    model.load_state_dict(torch.load("/data/zimiao/models/bert_after_iter0.pt"))
+    model.eval()
+    wrapper = WrapperModel(model)
+
+    input_ids = torch.ones([1, 512], dtype=torch.int64).to(device)	
+    attention_mask = torch.ones([1, 512], dtype=torch.int64).to(device)	
+    labels = torch.ones([1, 1], dtype=torch.int64).to(device)
+
+    out = wrapper(input_ids, attention_mask, labels)
+    out.backward()
+    print(out)
+    print(attention_mask.grad)
+
+def read_imdb_split(split_dir):
+    split_dir = Path(split_dir)
+    texts = []
+    labels = []
+    for label_dir in ["pos", "neg"]:
+        for text_file in (split_dir/label_dir).iterdir():
+            texts.append(text_file.read_text())
+            labels.append(0 if label_dir is "neg" else 1)
+
+    return texts, labels
+
+class IMDbDataset(torch.utils.data.Dataset):
+    def __init__(self, encodings, labels):
+        self.encodings = encodings
+        self.labels = labels
+
+    def __getitem__(self, idx):
+        item = {key: torch.tensor(val[idx]) for key, val in self.encodings.items()}
+        item['labels'] = torch.tensor(self.labels[idx])
+        return item
+
+    def __len__(self):
+        return len(self.labels)
+
+def train_bert():
+    train_texts, train_labels = read_imdb_split('/data/zimiao/downloads/aclImdb/train')
+    test_texts, test_labels = read_imdb_split('/data/zimiao/downloads/aclImdb/test')
+
+    train_texts, val_texts, train_labels, val_labels = train_test_split(train_texts, train_labels, test_size=.2)
+
+    tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+
+    train_encodings = tokenizer(train_texts, truncation=True, padding=True)
+    val_encodings = tokenizer(val_texts, truncation=True, padding=True)
+    test_encodings = tokenizer(test_texts, truncation=True, padding=True)
+
+    train_dataset = IMDbDataset(train_encodings, train_labels)
+    val_dataset = IMDbDataset(val_encodings, val_labels)
+    test_dataset = IMDbDataset(test_encodings, test_labels)
+
+    device = "cuda:0"
+    model = BertForSequenceClassification.from_pretrained(
+        'bert-base-uncased', return_dict=True)
+    model.to(device)
+    # should switch to train()
+    model.eval()
+    wrapper = WrapperModel(model)
+    trainer = Trainer(wrapper, device=device, workdir="./tmp")
+
+    train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True)
+
+    sum_pt_loss = 0
+    sum_nnf_loss = 0
+    sum_iter = 0
+    for epoch in range(3):
+        for i, batch in enumerate(train_loader):
+            if i % 100 == 0:
+                if sum_iter == 0:
+                    continue
+                print("Epoch {}, batch {}, pt_loss {}, nnf_loss {}".format(epoch, i, sum_pt_loss/sum_iter, sum_nnf_loss/sum_iter))
+                sum_pt_loss = 0
+                sum_nnf_loss = 0
+                sum_iter = 0
+
+            input_ids = batch['input_ids'].to(device) # [8, 512]
+            attention_mask = batch['attention_mask'].to(device) # [8, 512]
+            labels = batch['labels'].to(device) # [8]
+            # pt_loss = trainer.run_by_pytorch(input_ids, attention_mask,
+            #                                   labels)
+            pt_loss = 0
+            nnf_loss = trainer(input_ids, attention_mask, labels)            
+            sum_pt_loss += pt_loss
+            sum_nnf_loss += nnf_loss
+            sum_iter += 1
+            print("Epoch {}, batch {}, pt_loss {}, nnf_loss {}".format(epoch, i, sum_pt_loss/sum_iter, sum_nnf_loss/sum_iter))        
 
 if __name__ == "__main__":
-    test_runner()
-    train_bert()
+    # test_runner()
+    # train_bert()
+    #for_test()
+    export_onnx()
+    # get_grad()
