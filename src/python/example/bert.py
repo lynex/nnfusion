@@ -62,7 +62,7 @@ def for_test():
     device = "cuda:0"
     model = BertForSequenceClassification.from_pretrained(
         'bert-base-uncased', return_dict=True).to(device)
-    model.load_state_dict(torch.load("/data/zimiao/models/bert_after_iter0.pt"))
+    # model.load_state_dict(torch.load("/data/zimiao/models/bert_after_iter0.pt"))
     model.eval()
     # model.train()
     wrapper = WrapperModel(model)
@@ -83,7 +83,11 @@ def for_test():
     attention_mask = torch.ones([1, 512], dtype=torch.int64).to(device)	
     labels = torch.ones([1, 1], dtype=torch.int64).to(device)
 
-    trainer = Trainer(wrapper, device=device, workdir="./tmp")
+    codegen_flags = {
+        "kernel_fusion_level": 0
+    }
+
+    trainer = Trainer(wrapper, device=device, codegen_flags=codegen_flags, workdir="./tmp")
     print("feeding")
     for i in range(10000):
         pytorch_loss = trainer.run_by_pytorch(input_ids, attention_mask,
@@ -181,7 +185,10 @@ def train_bert():
     # should switch to train()
     model.eval()
     wrapper = WrapperModel(model)
-    trainer = Trainer(wrapper, device=device, workdir="./tmp")
+    codegen_flags = {
+        "kernel_fusion_level": 0
+    }
+    trainer = Trainer(wrapper, device=device, codegen_flags=codegen_flags, workdir="./tmp")
 
     train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True)
 
@@ -213,6 +220,6 @@ def train_bert():
 if __name__ == "__main__":
     # test_runner()
     # train_bert()
-    #for_test()
-    export_onnx()
+    for_test()
+    # export_onnx()
     # get_grad()

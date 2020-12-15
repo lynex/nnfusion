@@ -76,7 +76,7 @@ def train_mnist():
     device = "cuda:0"
     batch_size = 5
 
-    trainer = Trainer(model, loss_func, device)
+    trainer = Trainer(model, loss_func, device=device)
     train_loader, _ = data_loader.get_mnist_dataloader(batch_size=batch_size)
     print("feeding")
     i = 0
